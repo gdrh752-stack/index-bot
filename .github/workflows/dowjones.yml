@@ -1,0 +1,25 @@
+name: Dow Jones
+
+on:
+  schedule:
+    # 01:41 AM IST (next day) => 20:11 UTC (previous day)
+    # Isliye yahan SUN–THU rakha hai, taa ki IST me Mon–Fri raat ko chale.
+    - cron: "11 20 * * 0-4"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run DOW job
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    DOW
+        run: python bot_action.py
