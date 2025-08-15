@@ -1,5 +1,5 @@
-aiogram
-apscheduler
+requests
+python-dotenv
+pytz
 httpx
 beautifulsoup4
-python-dotenv
