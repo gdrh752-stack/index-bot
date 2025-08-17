@@ -1,4 +1,1 @@
-requests
-pytz
-beautifulsoup4
-lxml
+requests==2.32.3
