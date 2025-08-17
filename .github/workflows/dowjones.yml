@@ -1,10 +1,9 @@
-name: Dow Jones
+name: DOWJONES
 
 on:
   schedule:
-    # 01:41 AM IST (next day) => 20:11 UTC (previous day)
-    # Isliye yahan SUN–THU rakha hai, taa ki IST me Mon–Fri raat ko chale.
-    - cron: "11 20 * * 0-4"
+    # 01:40 AM IST => 20:10 UTC (Mon-Fri)
+    - cron: "10 20 * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -15,11 +14,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install deps
         run: pip install -r requirements.txt
-      - name: Run DOW job
+
+      - name: Run DOWJONES job
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID:  ${{ secrets.CHAT_ID }}
-          INDEX:    DOWJONES
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          INDEX: DOWJONES
         run: python bot_action.py
