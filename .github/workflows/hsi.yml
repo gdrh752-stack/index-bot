@@ -1,7 +1,7 @@
 name: Hang Seng
 on:
   schedule:
-    - cron: "10 7 * * 1-5"   # apne time ke hisaab se
+    - cron: "41 08 * * 1-5"   # 01:41 PM IST = 08:11 UTC  ➜ tumhare schedule ke hisaab se set karo
   workflow_dispatch:
 
 jobs:
