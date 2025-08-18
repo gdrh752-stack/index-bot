@@ -1,40 +1,101 @@
-import os, requests
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import os, time, math, requests
+import yfinance as yf
 
-# Yahoo Finance symbols
-TICKERS = {
-    "TAIWAN": "^TWII",
-    "KOSPI": "^KS11",
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID   = os.getenv("CHAT_ID")
+INDEX     = (os.getenv("INDEX") or "").upper().strip()
+
+# Yahoo symbols map
+YAHOO = {
+    "TAIWAN":   "^TWII",   # TAIEX
+    "KOSPI":    "^KS11",
     "HANGSENG": "^HSI",
-    "SENSEX": "^BSESN",
-    "DAX": "^GDAXI",
+    "SENSEX":   "^BSESN",
+    "DAX":      "^GDAXI",
     "DOWJONES": "^DJI",
+    "DOW":      "^DJI",    # fallback
 }
 
-def fetch_last2(symbol):
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    resp = requests.get(url, params={"symbols": symbol})
-    data = resp.json()
-    p = data["quoteResponse"]["result"][0]["regularMarketPrice"]
-    return f"{p:.2f}".split(".")[1] if p else "??"
+if INDEX not in YAHOO:
+    raise SystemExit(f"Unknown INDEX '{INDEX}'. Allowed: {', '.join(YAHOO)}")
 
-def send_telegram(msg):
-    token = os.getenv("TELEGRAM_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": msg}
-    r = requests.post(url, data=payload).json()
-    # Pin message
-    if "result" in r and "message_id" in r["result"]:
-        mid = r["result"]["message_id"]
-        pin_url = f"https://api.telegram.org/bot{token}/pinChatMessage"
-        requests.post(pin_url, data={"chat_id": chat_id, "message_id": mid})
+SYMBOL = YAHOO[INDEX]
 
-if __name__ == "__main__":
-    idx = os.getenv("INDEX", "UNKNOWN").upper()
-    sym = TICKERS.get(idx)
-    last2 = fetch_last2(sym) if sym else "??"
-    now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d-%m-%Y %H:%M IST")
-    msg = f"{idx} : {last2}\n{now}"
-    send_telegram(msg)
+def send_message(text: str, pin: bool = True):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text})
+    r.raise_for_status()
+    if pin:
+        msg_id = r.json()["result"]["message_id"]
+        # Best-effort pin; ignore if rights not available
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage",
+                json={"chat_id": CHAT_ID, "message_id": msg_id, "disable_notification": True},
+                timeout=10
+            )
+        except Exception:
+            pass
+
+def last_trade_price(symbol: str) -> float | None:
+    """
+    Try multiple safe ways to get a sane last price.
+    Returns float or None.
+    """
+    tk = yf.Ticker(symbol)
+
+    # 1) fast_info last price
+    try:
+        p = tk.fast_info.get("lastPrice")
+        if p and math.isfinite(p):
+            return float(p)
+    except Exception:
+        pass
+
+    # 2) recent 1d candles (1m/2m interval)
+    for interval in ("1m", "2m", "5m"):
+        try:
+            df = tk.history(period="1d", interval=interval, auto_adjust=False)
+            if df is not None and not df.empty:
+                val = float(df["Close"].dropna().iloc[-1])
+                if math.isfinite(val):
+                    return val
+        except Exception:
+            pass
+
+    # 3) fallback to info (slower)
+    try:
+        info = tk.info or {}
+        p = info.get("regularMarketPrice") or info.get("previousClose")
+        if p and math.isfinite(p):
+            return float(p)
+    except Exception:
+        pass
+
+    return None
+
+def two_digits_after_decimal(price: float) -> str:
+    """
+    Tumhari requirement: 'decimal ke baad ke 2 number'.
+    Example: 25176.85 → '85'
+    """
+    frac = int(abs(round(price * 100)) % 100)
+    return f"{frac:02d}"
+
+# -------- main ----------
+attempts = 5
+delay = 6  # seconds
+
+price = None
+for i in range(1, attempts + 1):
+    price = last_trade_price(SYMBOL)
+    if price is not None:
+        break
+    time.sleep(delay)
+
+if price is None:
+    # Data nahi mila – job ko GREEN rakhte hue sirf warning bhej do
+    send_message(f"⚠️ {INDEX} update failed after {attempts} attempts.")
+else:
+    pair = two_digits_after_decimal(price)
+    send_message(f"{INDEX} : {pair}")
