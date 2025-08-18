@@ -1,118 +1,158 @@
-import os, sys, datetime as dt
+import os
+import time
+from decimal import Decimal, ROUND_DOWN
+from datetime import datetime, timezone
+import pytz
 import requests
-from zoneinfo import ZoneInfo
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID   = os.getenv("CHAT_ID")
-INDEX     = (os.getenv("INDEX") or "").strip().upper()
+# We will use yfinance but import lazily to control retries
+import yfinance as yf
 
-API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# ---------- Config ----------
+TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID   = os.getenv("CHAT_ID", "").strip()
+INDEX_NAME         = (os.getenv("INDEX", "") or "").strip().upper()  # e.g. SENSEX, HANGSENG, KOSPI, TAIWAN, DAX, DOWJONES
 
-YAHOO_SYMBOLS = {
+# Yahoo tickers for each index
+TICKERS = {
     "SENSEX":   "^BSESN",
     "HANGSENG": "^HSI",
-    "TAIWAN":   "^TWII",
     "KOSPI":    "^KS11",
+    "TAIWAN":   "^TWII",
     "DAX":      "^GDAXI",
     "DOWJONES": "^DJI",
 }
 
-UA_HDRS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json,text/plain,*/*",
-    "Connection": "close",
-}
+# Retry config
+FETCH_RETRIES = 5
+FETCH_DELAYS  = [2, 3, 5, 7, 10]  # seconds
 
-def ist_now_str():
-    now_ist = dt.datetime.now(ZoneInfo("Asia/Kolkata"))
-    return now_ist.strftime("%d-%m-%Y %H:%M IST")
+SEND_RETRIES  = 5
+SEND_DELAYS   = [2, 3, 5, 7, 10]
 
-def send_message(text: str, pin: bool = True):
-    try:
-        r = requests.post(f"{API}/sendMessage",
-                          data={"chat_id": CHAT_ID, "text": text}, timeout=25)
-        if pin and r.ok:
-            mid = r.json().get("result", {}).get("message_id")
-            if mid:
-                requests.post(f"{API}/pinChatMessage",
-                              data={"chat_id": CHAT_ID, "message_id": mid,
-                                    "disable_notification": True},
-                              timeout=25)
-    except Exception as e:
-        print("Telegram error:", repr(e))
+IST = pytz.timezone("Asia/Kolkata")
 
-def _extract_price(q: dict):
-    # teen fallback: live -> post -> prev close
-    for k in ("regularMarketPrice", "postMarketPrice", "regularMarketPreviousClose"):
-        v = q.get(k)
-        if v is not None:
-            try:
-                return float(v)
-            except Exception:
-                pass
-    return None
 
-def fetch_yahoo(symbol: str):
-    # try 1: query1
-    url1 = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}&lang=en-US&region=US"
-    # try 2: query2
-    url2 = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbol}&lang=en-US&region=US"
-    # try 3: chart (kabhi kabhi quote fail ho, chart deta hai)
-    url3 = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1m&lang=en-US&region=US"
+def get_last_two_decimal_digits(price) -> str:
+    """
+    Return last two digits after decimal (00..99) as string, from a numeric price.
+    Uses Decimal to avoid float issues.
+    Example: 80597.66 -> '66', 17894.00 -> '00', 15678.1 -> '10'
+    """
+    d = Decimal(str(price))
+    # Format to exactly 2 decimal places without rounding up weirdly
+    d2 = d.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    # Separate fractional part
+    frac = (d2 - int(d2)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    # frac will be like 0.66, 0.00, 0.10 ...
+    # multiply by 100 and take integer
+    last2 = int((frac * 100).to_integral_value(rounding=ROUND_DOWN))
+    return f"{last2:02d}"
 
-    for url in (url1, url2):
+
+def fetch_price_with_retry(ticker: str):
+    """
+    Try to fetch last price via yfinance with retries.
+    Returns a Decimal-compatible number or None if failed.
+    """
+    err = None
+    for attempt, delay in zip(range(1, FETCH_RETRIES + 1), FETCH_DELAYS + [FETCH_DELAYS[-1]]):
         try:
-            r = requests.get(url, headers=UA_HDRS, timeout=25)
-            print("GET", url.split('/')[2], r.status_code)
-            if r.status_code == 200:
-                js = r.json()
-                res = js.get("quoteResponse", {}).get("result", [])
-                if res:
-                    p = _extract_price(res[0])
-                    if p is not None:
-                        return p
+            t = yf.Ticker(ticker)
+            # Fast path: try .fast_info (newer yfinance)
+            price = None
+            try:
+                fi = getattr(t, "fast_info", None)
+                if fi:
+                    price = fi.get("last_price") or fi.get("lastPrice")
+            except Exception:
+                price = None
+
+            # Fallback to .info or .history
+            if price is None:
+                info = {}
+                try:
+                    info = t.info or {}
+                except Exception:
+                    info = {}
+                price = info.get("regularMarketPrice") or info.get("previousClose")
+
+            if price is None:
+                # Last resort: short history (1d), get last close
+                hist = t.history(period="1d", interval="1m")
+                if not hist.empty:
+                    # Prefer last valid close
+                    price = hist["Close"].dropna().iloc[-1]
+
+            if price is not None:
+                return float(price)
+
+            err = f"No price in attempt {attempt}"
         except Exception as e:
-            print("quote error:", repr(e))
+            err = str(e)
 
-    # chart fallback
-    try:
-        r = requests.get(url3, headers=UA_HDRS, timeout=25)
-        print("GET chart", r.status_code)
-        if r.status_code == 200:
-            js = r.json()
-            result = js.get("chart", {}).get("result", [])
-            if result:
-                meta = result[0].get("meta", {})
-                p = meta.get("regularMarketPrice") or meta.get("previousClose")
-                if p is not None:
-                    return float(p)
-    except Exception as e:
-        print("chart error:", repr(e))
+        time.sleep(delay)
 
+    print(f"[ERROR] fetch_price_with_retry failed for {ticker}: {err}")
     return None
+
+
+def send_telegram(text: str) -> bool:
+    """
+    Send message to Telegram with retries. Returns True if sent.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[ERROR] BOT_TOKEN / CHAT_ID missing.")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    last_err = None
+    for attempt, delay in zip(range(1, SEND_RETRIES + 1), SEND_DELAYS + [SEND_DELAYS[-1]]):
+        try:
+            r = requests.post(url, json=payload, timeout=20)
+            if r.ok:
+                return True
+            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(delay)
+
+    print(f"[ERROR] send_telegram failed: {last_err}")
+    return False
+
 
 def main():
-    if not BOT_TOKEN or not CHAT_ID:
-        print("ENV missing"); sys.exit(1)
-
-    sym = YAHOO_SYMBOLS.get(INDEX)
-    if not sym:
-        send_message(f"{INDEX or 'INDEX'} : ??\n{ist_now_str()}"); return
-
-    print("Fetching:", INDEX, "->", sym)
-    price = fetch_yahoo(sym)
-
-    if price is None:
-        # last resort: clear message but time pin ho jaye
-        send_message(f"{INDEX} : ??\n{ist_now_str()}")
+    if INDEX_NAME not in TICKERS:
+        print(f"[ERROR] Unknown INDEX '{INDEX_NAME}'. Valid: {', '.join(TICKERS.keys())}")
         return
 
-    # exactly 2 digits decimal
-    dec = f"{price:.2f}".split(".")[1]
-    msg = f"{INDEX} : {dec}\n{ist_now_str()}"
-    send_message(msg, pin=True)
+    ticker = TICKERS[INDEX_NAME]
+    price = fetch_price_with_retry(ticker)
 
-if __name__ == "__main__" :
+    if price is None:
+        # Don’t spam “??”. Quietly exit; GH Action logs will show error.
+        return
+
+    last2 = get_last_two_decimal_digits(price)
+
+    # Timestamp in IST
+    now_ist = datetime.now(timezone.utc).astimezone(IST)
+    ts = now_ist.strftime("%d-%m-%Y %H:%M IST")
+
+    # Final message (exact style you’re using)
+    # Example: "SENSEX : 66\n17-08-2025 16:34 IST"
+    msg = f"{INDEX_NAME} : {last2}\n{ts}"
+
+    ok = send_telegram(msg)
+    print("[INFO] Sent" if ok else "[WARN] Not sent")
+
+
+if __name__ == "__main__":
     main()
