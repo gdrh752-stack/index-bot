@@ -1,101 +1,154 @@
-import os, time, math, requests
+import os, time, datetime as dt
+from zoneinfo import ZoneInfo
+
+import requests
 import yfinance as yf
+import pandas as pd
 
+
+# ---------- Config ----------
+INDEX = (os.getenv("INDEX") or "").strip().upper()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID   = os.getenv("CHAT_ID")
-INDEX     = (os.getenv("INDEX") or "").upper().strip()
+CHAT_ID = os.getenv("CHAT_ID")
 
-# Yahoo symbols map
-YAHOO = {
-    "TAIWAN":   "^TWII",   # TAIEX
-    "KOSPI":    "^KS11",
-    "HANGSENG": "^HSI",
-    "SENSEX":   "^BSESN",
-    "DAX":      "^GDAXI",
-    "DOWJONES": "^DJI",
-    "DOW":      "^DJI",    # fallback
+# Map INDEX -> Yahoo Finance ticker
+TICKERS = {
+    "TAIWAN":  "^TWII",     # Taiwan Weighted (TAIEX)
+    "KOSPI":   "^KS11",
+    "HANGSENG":"^HSI",
+    "SENSEX":  "^BSESN",
+    "DAX":     "^GDAXI",
+    "DOWJONES":"^DJI",
 }
 
-if INDEX not in YAHOO:
-    raise SystemExit(f"Unknown INDEX '{INDEX}'. Allowed: {', '.join(YAHOO)}")
-
-SYMBOL = YAHOO[INDEX]
-
+# ---------- Helpers ----------
 def send_message(text: str, pin: bool = True):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text})
+    if not (BOT_TOKEN and CHAT_ID):
+        raise RuntimeError("BOT_TOKEN or CHAT_ID missing")
+
+    api = f"https://api.telegram.org/bot{BOT_TOKEN}"
+    r = requests.post(f"{api}/sendMessage",
+                      json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True})
     r.raise_for_status()
-    if pin:
-        msg_id = r.json()["result"]["message_id"]
-        # Best-effort pin; ignore if rights not available
+    msg = r.json().get("result", {})
+    if pin and msg.get("message_id"):
         try:
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage",
-                json={"chat_id": CHAT_ID, "message_id": msg_id, "disable_notification": True},
-                timeout=10
-            )
+            requests.post(f"{api}/pinChatMessage",
+                          json={"chat_id": CHAT_ID, "message_id": msg["message_id"], "disable_notification": True})
         except Exception:
-            pass
+            pass  # not admin or pin disabled – ignore
 
-def last_trade_price(symbol: str) -> float | None:
-    """
-    Try multiple safe ways to get a sane last price.
-    Returns float or None.
-    """
-    tk = yf.Ticker(symbol)
 
-    # 1) fast_info last price
+def last_two_decimals(number) -> str:
+    """
+    Exactly last two digits of the decimal part, zero-padded.
+    25176.85 -> '85', 25176.8 -> '80', 25176.00 -> '00'
+    """
     try:
-        p = tk.fast_info.get("lastPrice")
-        if p and math.isfinite(p):
-            return float(p)
+        s = f"{float(number):.2f}"
+    except Exception:
+        return "??"
+    dec = s.split(".")[1] if "." in s else "00"
+    if len(dec) == 1:
+        dec = dec + "0"
+    return dec[:2]
+
+
+def fetch_price_yf(ticker: str):
+    """
+    Try multiple ways with yfinance:
+    1) fast_info.last_price
+    2) history 1m (tail 1)
+    3) info['regularMarketPrice']
+    Returns float or None
+    """
+    tk = yf.Ticker(ticker)
+
+    # 1) fast_info
+    try:
+        lp = getattr(tk, "fast_info", {}).get("last_price")
+        if lp: 
+            return float(lp)
     except Exception:
         pass
 
-    # 2) recent 1d candles (1m/2m interval)
-    for interval in ("1m", "2m", "5m"):
-        try:
-            df = tk.history(period="1d", interval=interval, auto_adjust=False)
-            if df is not None and not df.empty:
-                val = float(df["Close"].dropna().iloc[-1])
-                if math.isfinite(val):
-                    return val
-        except Exception:
-            pass
-
-    # 3) fallback to info (slower)
+    # 2) intraday last candle
     try:
-        info = tk.info or {}
-        p = info.get("regularMarketPrice") or info.get("previousClose")
-        if p and math.isfinite(p):
-            return float(p)
+        df = tk.history(period="1d", interval="1m", auto_adjust=False, prepost=False)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            v = df["Close"].dropna().tail(1)
+            if not v.empty:
+                return float(v.iloc[0])
+    except Exception:
+        pass
+
+    # 3) regularMarketPrice
+    try:
+        info = tk.info
+        v = info.get("regularMarketPrice")
+        if v:
+            return float(v)
+    except Exception:
+        pass
+
+    # 4) Previous close (fallback)
+    try:
+        df = tk.history(period="5d", interval="1d", auto_adjust=False, prepost=False)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            v = df["Close"].dropna().tail(1)
+            if not v.empty:
+                return float(v.iloc[0])
     except Exception:
         pass
 
     return None
 
-def two_digits_after_decimal(price: float) -> str:
-    """
-    Tumhari requirement: 'decimal ke baad ke 2 number'.
-    Example: 25176.85 → '85'
-    """
-    frac = int(abs(round(price * 100)) % 100)
-    return f"{frac:02d}"
 
-# -------- main ----------
-attempts = 5
-delay = 6  # seconds
+def fetch_with_retry(ticker: str, attempts: int = 5, delay_sec: int = 5):
+    last_val = None
+    for i in range(1, attempts + 1):
+        try:
+            val = fetch_price_yf(ticker)
+            if val is not None and float(val) > 0:
+                return float(val), False  # value, is_fallback=False
+        except Exception:
+            pass
+        last_val = val if 'val' in locals() else None
+        time.sleep(delay_sec)
 
-price = None
-for i in range(1, attempts + 1):
-    price = last_trade_price(SYMBOL)
-    if price is not None:
-        break
-    time.sleep(delay)
+    # Couldn’t fetch live; try explicit fallback (previous close already attempted inside)
+    if last_val is None:
+        last_val = fetch_price_yf(ticker)
+    return (float(last_val) if last_val else None), True  # value, is_fallback=True if we got here
 
-if price is None:
-    # Data nahi mila – job ko GREEN rakhte hue sirf warning bhej do
-    send_message(f"⚠️ {INDEX} update failed after {attempts} attempts.")
-else:
-    pair = two_digits_after_decimal(price)
-    send_message(f"{INDEX} : {pair}")
+
+def main():
+    if INDEX not in TICKERS:
+        raise RuntimeError(f"Unknown INDEX '{INDEX}'. Valid: {', '.join(TICKERS)}")
+
+    ticker = TICKERS[INDEX]
+
+    value, used_fallback = fetch_with_retry(ticker)
+
+    ist = dt.datetime.now(ZoneInfo("Asia/Kolkata"))
+    stamp = ist.strftime("%d-%m-%Y %H:%M IST")
+
+    if value is None:
+        # Total failure – very rare with above fallbacks
+        send_message(f"⚠️ {INDEX} update failed after retries.", pin=False)
+        return
+
+    two = last_two_decimals(value)
+
+    # Compose message
+    head = f"{INDEX} : {two}"
+    body = f"{stamp}"
+    trailer = "\n(⚠️ fallback used)" if used_fallback else ""
+    text = f"{head}\n{body}{trailer}"
+
+    send_message(text, pin=True)
+    print(text)
+
+
+if __name__ == "__main__":
+    main()
