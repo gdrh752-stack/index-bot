@@ -16,4 +16,5 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:  ${{ secrets.CHAT_ID }}
           INDEX:    DAX
+          TD_API_KEY: ${{ secrets.TD_API_KEY }}
         run: python bot_action.py
