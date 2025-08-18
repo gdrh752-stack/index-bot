@@ -1,42 +1,19 @@
 name: Taiwan
-
 on:
   schedule:
-    # 11:03 AM IST => 05:33 UTC (Mon–Fri)
-    - cron: "33 5 * * 1-5"
+    - cron: "33 5 * * 1-5"   # 11:03 AM IST
   workflow_dispatch:
-
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        run: pip install -r requirements.txt
-
-      - name: Run TAIWAN job (with retry)
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Run job
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID:   ${{ secrets.CHAT_ID }}
-          INDEX:     TAIWAN
-        run: |
-          set -e
-          for i in 1 2 3; do
-            echo "Attempt $i..."
-            if python bot_action.py; then
-              echo "Done"
-              exit 0
-            fi
-            echo "Attempt $i failed. Waiting 20s..."
-            sleep 20
-          done
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d chat_id="${CHAT_ID}" \
-            -d text="⚠️ TAIWAN update failed after 3 attempts."
-          exit 1
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    TAIWAN
+        run: python bot_action.py
