@@ -1,3 +1,2 @@
-yfinance
-pytz
-requests
+yfinance==0.2.40
+requests==2.32.3
