@@ -1,18 +1,15 @@
 name: DowJones
-
 on:
   schedule:
-    - cron: '0 20 * * 1-5'   # 01:30 IST next day
+    - cron: "01 20 * * 1-5"  # 01:31 AM IST (next day) == 20:01 UTC (same day Mon–Fri)
   workflow_dispatch:
-
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
+        with: { python-version: "3.11" }
       - run: pip install -r requirements.txt
       - name: Run job
         env:
