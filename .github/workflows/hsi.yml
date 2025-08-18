@@ -1,21 +1,20 @@
-name: Hang Seng
+name: Hangseng Update
+
 on:
   schedule:
-    # 12:35 PM IST ⇒ 07:05 UTC (Mon–Fri)
-    - cron: "5 7 * * 1-5"
+    - cron: "11 8 * * 1-5"
   workflow_dispatch:
 
 jobs:
-  run:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
       - run: pip install -r requirements.txt
-      - name: Run HSI job
+      - run: python bot_action.py --target "HANGSENG"
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID:  ${{ secrets.CHAT_ID }}
-          INDEX:    HANGSENG
-        run: python bot_action.py
+          CHAT_ID: ${{ secrets.CHAT_ID }}
