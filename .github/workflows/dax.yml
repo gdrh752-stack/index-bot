@@ -2,34 +2,21 @@ name: DAX
 
 on:
   schedule:
-    # 09:08 PM IST => 15:38 UTC (Mon–Fri)
-    - cron: "38 15 * * 1-5"
+    - cron: '30 15 * * 1-5'   # 21:00 IST
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Install deps
-        run: pip install -r requirements.txt
-      - name: Run DAX job (with retry)
+          python-version: '3.x'
+      - run: pip install -r requirements.txt
+      - name: Run job
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID:   ${{ secrets.CHAT_ID }}
-          INDEX:     DAX
-        run: |
-          set -e
-          for i in 1 2 3; do
-            echo "Attempt $i..."
-            if python bot_action.py; then exit 0; fi
-            echo "Attempt $i failed. Waiting 20s..."; sleep 20
-          done
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d chat_id="${CHAT_ID}" \
-            -d text="⚠️ DAX update failed after 3 attempts."
-          exit 1
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    DAX
+        run: python bot_action.py
