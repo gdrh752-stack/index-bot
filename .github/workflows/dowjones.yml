@@ -1,7 +1,7 @@
-name: DowJones
+name: Dow Jones
 on:
   schedule:
-    - cron: "01 20 * * 1-5"  # 01:31 AM IST (next day) == 20:01 UTC (same day Mon–Fri)
+    - cron: "1 20 * * 1-5"   # 20:01 UTC (Mon–Fri) = 01:31 IST (Tue–Sat)
   workflow_dispatch:
 jobs:
   run:
@@ -16,5 +16,4 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:  ${{ secrets.CHAT_ID }}
           INDEX:    DOWJONES
-          TD_API_KEY: ${{ secrets.TD_API_KEY }}
         run: python bot_action.py
