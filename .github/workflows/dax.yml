@@ -1,7 +1,7 @@
 name: DAX
 on:
   schedule:
-    - cron: "38 15 * * 1-5"  # 09:08 PM IST
+    - cron: "38 15 * * 1-5"  # 15:38 UTC = 21:08 IST
   workflow_dispatch:
 jobs:
   run:
@@ -16,5 +16,4 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:  ${{ secrets.CHAT_ID }}
           INDEX:    DAX
-          TD_API_KEY: ${{ secrets.TD_API_KEY }}
         run: python bot_action.py
