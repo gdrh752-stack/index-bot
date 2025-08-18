@@ -1,91 +1,104 @@
-import os, re, time, html
-import requests
+import os, time, requests
+from datetime import datetime
+import pytz
+import yfinance as yf
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID   = os.environ["CHAT_ID"]
-INDEX     = os.environ["INDEX"].upper().strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID   = os.getenv("CHAT_ID")
+INDEX     = (os.getenv("INDEX") or "").strip().upper()   # e.g. HANGSENG, KOSPI, SENSEX, DAX, DOWJONES, TAIWAN
 
-# Yahoo Finance pages (region-agnostic)
-YAHOO_URLS = {
-    "TAIWAN":   "https://finance.yahoo.com/quote/%5ETWII",
-    "KOSPI":    "https://finance.yahoo.com/quote/%5EKS11",
-    "HANGSENG": "https://finance.yahoo.com/quote/%5EHSI",
-    "SENSEX":   "https://finance.yahoo.com/quote/%5EBSESN",
-    "DAX":      "https://finance.yahoo.com/quote/%5EGDAXI",
-    "DOWJONES": "https://finance.yahoo.com/quote/%5EDJI",
+# Map: INDEX -> (Yahoo symbol, Display name)
+YMAP = {
+    "SENSEX":   ("^BSESN",  "SENSEX"),
+    "HANGSENG": ("^HSI",    "HANG SENG"),
+    "KOSPI":    ("^KS11",   "KOSPI"),
+    "TAIWAN":   ("^TWII",   "TAIWAN"),
+    "DAX":      ("^GDAXI",  "DAX"),
+    "DOWJONES": ("^DJI",    "DOWJONES"),
 }
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-}
+IST = pytz.timezone("Asia/Kolkata")
 
-def fetch_price(url, attempts=6, wait=8):
+def get_last_two_digits(price: float) -> str:
+    # integer part ke last 2 digits, zero-padded
+    n = int(abs(price)) % 100
+    return f"{n:02d}"
+
+def fetch_price(symbol: str) -> float:
     """
-    Pull the live price number from Yahoo Finance page HTML.
-    We look for the first big numeric like 25,176.85 in the page.
+    Robust fetch with small retries. Prefer fast_info, else history.
     """
+    attempts = 4
     for i in range(attempts):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=20)
-            if r.status_code == 200:
-                text = r.text
+            t = yf.Ticker(symbol)
+            # 1) super-fast path
+            p = getattr(t.fast_info, "last_price", None)
+            if p is not None and p > 0:
+                return float(p)
 
-                # Find something like 25,176.85 or 2,345.00
-                m = re.search(r'(\d{1,3}(?:,\d{3})*(?:\.\d+))', text)
-                if m:
-                    raw = m.group(1)              # e.g. "25,176.85"
-                    no_commas = raw.replace(",", "")
-                    return float(no_commas)       # 25176.85
-                # Fallback: try a second pattern Yahoo sometimes uses
-                m2 = re.search(r'currentPrice.+?raw":\s*([\d\.]+)', text)
-                if m2:
-                    return float(m2.group(1))
-            # rate limiting / empty – back off
-            time.sleep(wait)
-        except Exception:
-            time.sleep(wait)
-    return None
+            # 2) recent candle
+            df = t.history(period="1d", interval="1m")
+            if df is not None and not df.empty:
+                # last non-NaN close
+                close = df["Close"].dropna()
+                if not close.empty:
+                    return float(close.iloc[-1])
 
-def last_two_decimals(value: float) -> str:
-    """
-    Return first two digits after decimal (00-99), WITHOUT rounding issues.
-    25176.85 -> "85"; 123.4 -> "40".
-    """
-    s = f"{value:.4f}"         # plenty precision
-    decimal = s.split(".")[1]  # e.g. "8500"
-    return (decimal + "00")[:2]
+            # 3) 1d daily close fallback
+            df = t.history(period="5d", interval="1d")
+            if df is not None and not df.empty:
+                close = df["Close"].dropna()
+                if not close.empty:
+                    return float(close.iloc[-1])
+        except Exception as e:
+            # mild backoff (avoid 429)
+            time.sleep(2 + i)
+    raise RuntimeError("no price (rate/conn).")
 
-def tg_send(text: str, disable_notification=True, pin=False):
+def send_msg(text: str, disable_notification: bool=False):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
+    r = requests.post(url, json={
         "chat_id": CHAT_ID,
-        "text": text,
-        "disable_notification": disable_notification,
-        "parse_mode": "HTML",
-    }
-    r = requests.post(url, data=payload, timeout=15)
-    if pin and r.ok:
-        msg_id = r.json().get("result", {}).get("message_id")
-        if msg_id:
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage",
-                data={"chat_id": CHAT_ID, "message_id": msg_id, "disable_notification": True},
-                timeout=15
-            )
+        "text": text
+    }, timeout=30)
+    r.raise_for_status()
+    return r.json()["result"]["message_id"]
+
+def pin_message(message_id: int):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage"
+    # silent pin (no push)
+    r = requests.post(url, json={
+        "chat_id": CHAT_ID,
+        "message_id": message_id,
+        "disable_notification": True
+    }, timeout=30)
+    # ignore pin errors silently
+    try:
+        r.raise_for_status()
+    except Exception:
+        pass
 
 def main():
-    if INDEX not in YAHOO_URLS:
-        tg_send(f"⚠️ INDEX missing/invalid: <b>{html.escape(INDEX)}</b>")
+    if INDEX not in YMAP:
+        # safety: agar env galat hai
+        send_msg(f"⚠️ INDEX env invalid: '{INDEX}'")
         return
 
-    price = fetch_price(YAHOO_URLS[INDEX])
-    if price is None:
-        tg_send(f"⚠️ {INDEX} fetch error: no price (rate/conn.).")
-        return
+    symbol, display = YMAP[INDEX]
 
-    num = last_two_decimals(price)  # yehi tumhe chahiye
-    tg_send(f"<b>{INDEX}</b> : <b>{num}</b>", pin=True)
+    try:
+        price = fetch_price(symbol)
+        last2 = get_last_two_digits(price)
+        now_ist = datetime.now(IST).strftime("%d-%m-%Y %H:%M IST")
+        text = f"{display} : {last2}\n{now_ist}"
+        mid = send_msg(text)
+        pin_message(mid)
+    except Exception as e:
+        # clear & helpful error
+        err = str(e)
+        mid = send_msg(f"⚠️ {display} fetch error: {err}")
+        # don't pin errors
 
 if __name__ == "__main__":
     main()
