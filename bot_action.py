@@ -1,104 +1,85 @@
-import os, time, requests
-from datetime import datetime
-import pytz
+import os, math, time, json, requests
 import yfinance as yf
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID   = os.getenv("CHAT_ID")
-INDEX     = (os.getenv("INDEX") or "").strip().upper()   # e.g. HANGSENG, KOSPI, SENSEX, DAX, DOWJONES, TAIWAN
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID   = os.environ["CHAT_ID"]
+INDEX     = os.environ["INDEX"].upper().strip()
 
-# Map: INDEX -> (Yahoo symbol, Display name)
-YMAP = {
-    "SENSEX":   ("^BSESN",  "SENSEX"),
-    "HANGSENG": ("^HSI",    "HANG SENG"),
-    "KOSPI":    ("^KS11",   "KOSPI"),
-    "TAIWAN":   ("^TWII",   "TAIWAN"),
-    "DAX":      ("^GDAXI",  "DAX"),
-    "DOWJONES": ("^DJI",    "DOWJONES"),
+# INDEX -> Yahoo tickers
+TICKERS = {
+    "SENSEX":    "^BSESN",
+    "HANGSENG":  "^HSI",
+    "KOSPI":     "^KS11",
+    "TAIWAN":    "^TWII",
+    "DAX":       "^GDAXI",
+    "DOWJONES":  "^DJI",
 }
 
-IST = pytz.timezone("Asia/Kolkata")
+if INDEX not in TICKERS:
+    raise SystemExit(f"Unknown INDEX '{INDEX}'. Use one of: {', '.join(TICKERS)}")
 
-def get_last_two_digits(price: float) -> str:
-    # integer part ke last 2 digits, zero-padded
-    n = int(abs(price)) % 100
-    return f"{n:02d}"
+ticker = TICKERS[INDEX]
 
-def fetch_price(symbol: str) -> float:
-    """
-    Robust fetch with small retries. Prefer fast_info, else history.
-    """
-    attempts = 4
-    for i in range(attempts):
-        try:
-            t = yf.Ticker(symbol)
-            # 1) super-fast path
-            p = getattr(t.fast_info, "last_price", None)
-            if p is not None and p > 0:
-                return float(p)
+def get_price(t):
+    """Try fast quote; fallback to history(1m). Return float price."""
+    tk = yf.Ticker(t)
+    # 1) fast info
+    p = tk.fast_info.last_price
+    if p is None:
+        # 2) regularMarketPrice
+        info = tk.info or {}
+        p = info.get("regularMarketPrice")
+    if p is None:
+        # 3) last 1 minute close
+        hist = tk.history(period="1d", interval="1m")
+        if not hist.empty:
+            p = float(hist["Close"].iloc[-1])
+    if p is None:
+        raise RuntimeError("no price")
+    return float(p)
 
-            # 2) recent candle
-            df = t.history(period="1d", interval="1m")
-            if df is not None and not df.empty:
-                # last non-NaN close
-                close = df["Close"].dropna()
-                if not close.empty:
-                    return float(close.iloc[-1])
+def two_decimals(price):
+    """Decimal ke baad ke exact 2 digits (floor), e.g. 25176.85 -> 85, 123.00 -> 00"""
+    frac = price - math.floor(price)
+    val  = int(math.floor(frac * 100 + 1e-6))  # 1e-6 to avoid 0.849999 → 84
+    return f"{val:02d}"
 
-            # 3) 1d daily close fallback
-            df = t.history(period="5d", interval="1d")
-            if df is not None and not df.empty:
-                close = df["Close"].dropna()
-                if not close.empty:
-                    return float(close.iloc[-1])
-        except Exception as e:
-            # mild backoff (avoid 429)
-            time.sleep(2 + i)
-    raise RuntimeError("no price (rate/conn).")
-
-def send_msg(text: str, disable_notification: bool=False):
+def send_message(text, disable_notification=False):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={
+    data = {
         "chat_id": CHAT_ID,
-        "text": text
-    }, timeout=30)
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_notification": disable_notification
+    }
+    r = requests.post(url, data=data, timeout=20)
     r.raise_for_status()
     return r.json()["result"]["message_id"]
 
-def pin_message(message_id: int):
+def pin_message(message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage"
-    # silent pin (no push)
-    r = requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "message_id": message_id,
-        "disable_notification": True
-    }, timeout=30)
-    # ignore pin errors silently
-    try:
-        r.raise_for_status()
-    except Exception:
-        pass
+    data = {"chat_id": CHAT_ID, "message_id": message_id, "disable_notification": True}
+    requests.post(url, data=data, timeout=20)
 
 def main():
-    if INDEX not in YMAP:
-        # safety: agar env galat hai
-        send_msg(f"⚠️ INDEX env invalid: '{INDEX}'")
-        return
+    tries = 0
+    last_err = None
+    while tries < 3:
+        tries += 1
+        try:
+            price = get_price(ticker)
+            num   = two_decimals(price)
+            # IST time stamp
+            ist_time = time.strftime("%d-%m-%Y %H:%M IST", time.gmtime(time.time() + 19800))
+            text = f"<b>{INDEX.replace('DOWJONES','DOW JONES')}</b> : <b>{num}</b>\n{ist_time}"
+            mid  = send_message(text)
+            pin_message(mid)
+            return
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(6)  # short backoff
+    # fail notice (quiet, no pin)
+    send_message(f"⚠️ {INDEX.replace('DOWJONES','DOW JONES')} fetch error: {last_err}", disable_notification=True)
 
-    symbol, display = YMAP[INDEX]
-
-    try:
-        price = fetch_price(symbol)
-        last2 = get_last_two_digits(price)
-        now_ist = datetime.now(IST).strftime("%d-%m-%Y %H:%M IST")
-        text = f"{display} : {last2}\n{now_ist}"
-        mid = send_msg(text)
-        pin_message(mid)
-    except Exception as e:
-        # clear & helpful error
-        err = str(e)
-        mid = send_msg(f"⚠️ {display} fetch error: {err}")
-        # don't pin errors
-
-if __name__ == "__main__":
+if __name__ == "__main__" :
     main()
