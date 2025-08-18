@@ -1,8 +1,7 @@
 name: Taiwan
 on:
   schedule:
-    # 11:03 AM IST  ⇒  05:33 UTC  (Mon–Fri)
-    - cron: "33 5 * * 1-5"
+    - cron: "33 5 * * 1-5"   # 05:33 UTC = 11:03 IST, Mon–Fri
   workflow_dispatch:
 
 jobs:
@@ -14,10 +13,9 @@ jobs:
         with: { python-version: "3.11" }
       - name: Install deps
         run: pip install -r requirements.txt
-      - name: Run TAIWAN job
+      - name: Run job
         env:
-          BOT_TOKEN:  ${{ secrets.BOT_TOKEN }}
-          CHAT_ID:    ${{ secrets.CHAT_ID }}
-          TD_API_KEY: ${{ secrets.TD_API_KEY }}
-          INDEX:      TWII
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    TAIWAN
         run: python bot_action.py
