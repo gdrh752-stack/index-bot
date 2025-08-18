@@ -1,14 +1,26 @@
-import os, time
-import requests
-from datetime import datetime, timezone, timedelta
-from urllib.parse import urlencode
+# bot_action.py
+import os, time, random, requests, re
+from datetime import datetime
+from urllib.parse import quote
 
-BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
-CHAT_ID   = os.environ["CHAT_ID"].strip()
-INDEX     = os.environ["INDEX"].strip().upper()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID   = os.getenv("CHAT_ID")
+INDEX     = os.getenv("INDEX", "").strip().upper()
+TD_API_KEY= os.getenv("TD_API_KEY", "").strip()
 
-SYMBOLS = {
-    "TAIWAN":   "^TWII",
+# ------------ Config ------------
+# आपके 6 indices का canonical नाम -> Twelve Data symbol mapping
+TD_SYMBOLS = {
+    "TAIWAN":   "TAIEX",     # Taiwan TAIEX
+    "KOSPI":    "KOSPI",     # Korea KOSPI
+    "HANGSENG": "HSI",       # Hang Seng Index
+    "SENSEX":   "SENSEX",    # BSE Sensex (कुछ अकाउंट में BSESN/ ^BSESN भी होता है)
+    "DAX":      "DAX",       # Germany DAX
+    "DOWJONES": "DJI",       # Dow Jones Industrial Average
+}
+# Yahoo fallback symbols (अगर Twelve Data न दे)
+YAHOO_SYMBOLS = {
+    "TAIWAN":   "^TWII",     # TAIEX
     "KOSPI":    "^KS11",
     "HANGSENG": "^HSI",
     "SENSEX":   "^BSESN",
@@ -16,93 +28,104 @@ SYMBOLS = {
     "DOWJONES": "^DJI",
 }
 
-UA = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-    "Accept": "application/json,text/plain,*/*",
-}
+UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+]
 
-def http_get(url, params=None, timeout=12):
-    # simple helper with headers
-    return requests.get(url, params=params, headers=UA, timeout=timeout)
+def _send(msg: str, pin: bool=False):
+    base = f"https://api.telegram.org/bot{BOT_TOKEN}"
+    requests.post(f"{base}/sendMessage", json={
+        "chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }, timeout=20)
+    if pin:
+        try:
+            # pin last message in chat from this bot
+            # (Telegram API: need message_id; simplest: getUpdates then pin)
+            upd = requests.get(f"{base}/getUpdates", timeout=20).json()
+            msgs = [u["message"] for u in upd.get("result", []) if "message" in u]
+            if msgs:
+                mid = msgs[-1]["message_id"]
+                requests.post(f"{base}/pinChatMessage", json={
+                    "chat_id": CHAT_ID, "message_id": mid, "disable_notification": True
+                }, timeout=20)
+        except Exception:
+            pass
 
-def fetch_price_from_yahoo(symbol, retries=6, pause=2.5):
-    """
-    Robust fetch:
-      - query1 and query2 दोनों try
-      - params से caret सही encode होता है
-      - fallback: previousClose (market बंद होने पर)
-    """
-    hosts = ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]
-    last_err = None
-    for attempt in range(1, retries + 1):
-        for host in hosts:
-            try:
-                url = f"{host}/v7/finance/quote"
-                r = http_get(url, params={"symbols": symbol})
-                if r.status_code != 200:
-                    last_err = f"HTTP {r.status_code}"
-                    continue
-                data = r.json()
-                res = data.get("quoteResponse", {}).get("result", [])
-                if not res:
-                    last_err = "empty result"
-                    continue
-                q = res[0]
-                px = q.get("regularMarketPrice")
-                if px is None:
-                    px = q.get("postMarketPrice") or q.get("preMarketPrice") or q.get("regularMarketPreviousClose")
-                if px is None:
-                    last_err = "no price field"
-                    continue
-                return float(px)
-            except Exception as e:
-                last_err = str(e)
-        time.sleep(pause)
-    raise RuntimeError(f"fetch failed: {last_err}")
+def twelvedata_latest(symbol: str):
+    if not TD_API_KEY: 
+        return None
+    url = f"https://api.twelvedata.com/time_series?symbol={quote(symbol)}&interval=1min&outputsize=1&apikey={TD_API_KEY}"
+    r = requests.get(url, timeout=25)
+    js = r.json()
+    # expected: {"values":[{"close":"..."}], ...}
+    vals = js.get("values") if isinstance(js, dict) else None
+    if vals and len(vals)>0 and "close" in vals[0]:
+        close = vals[0]["close"]
+        return close
+    return None
 
-def last_two_decimals(number: float) -> str:
-    s = f"{number:.2f}"          # ensures 2 decimals
-    return s.split(".")[1]       # "85" from "25176.85"
+def yahoo_last_price(symbol: str, retries=6):
+    # lightweight quote endpoint
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{quote(symbol)}?modules=price"
+    pause = 5
+    for i in range(retries):
+        try:
+            r = requests.get(url, headers={"User-Agent": random.choice(UA_POOL)}, timeout=25)
+            if r.status_code == 429:
+                time.sleep(pause); pause = min(pause*2, 60); continue
+            js = r.json()
+            price = js["quoteSummary"]["result"][0]["price"].get("regularMarketPrice") or \
+                    js["quoteSummary"]["result"][0]["price"].get("postMarketPrice")
+            if price:
+                return str(price["raw"] if isinstance(price, dict) and "raw" in price else price)
+        except Exception:
+            time.sleep(pause); pause = min(pause*2, 60)
+    return None
 
-def tg_send(text: str):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text}
-    r = requests.post(url, json=payload, timeout=15)
-    r.raise_for_status()
-    return r.json()["result"]["message_id"]
+def extract_two_digits(num_str: str) -> str:
+    # num_str like "25176.85" -> "85"
+    m = re.search(r"(\d+)(?:\.(\d{1,2}))?$", num_str)
+    if not m:
+        return None
+    frac = m.group(2) or "00"
+    if len(frac) == 1: frac += "0"
+    return frac[-2:]
 
-def tg_pin(mid: int):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage"
-    payload = {"chat_id": CHAT_ID, "message_id": mid, "disable_notification": True}
-    # pin fail होने पर job fail मत करो
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception:
-        pass
+def get_index_two_digits(index_name: str):
+    name = index_name.upper()
+    # 1) Twelve Data
+    td_sym = TD_SYMBOLS.get(name)
+    if td_sym:
+        try:
+            price = twelvedata_latest(td_sym)
+            if price:
+                two = extract_two_digits(str(price))
+                if two: return two, "TD"
+        except Exception:
+            pass
+    # 2) Yahoo fallback
+    yh_sym = YAHOO_SYMBOLS.get(name)
+    if yh_sym:
+        price = yahoo_last_price(yh_sym)
+        if price:
+            two = extract_two_digits(str(price))
+            if two: return two, "YF"
+    return None, None
 
 def main():
-    if INDEX not in SYMBOLS:
-        raise ValueError(f"Unknown INDEX: {INDEX}")
-
-    symbol = SYMBOLS[INDEX]
-    try:
-        price = fetch_price_from_yahoo(symbol)
-        two = last_two_decimals(price)
-        ist = timezone(timedelta(hours=5, minutes=30))
-        ts  = datetime.now(ist).strftime("%d-%m-%Y %H:%M IST")
-        msg = f"{INDEX} : {two}\n{ts}"
-        mid = tg_send(msg)
-        tg_pin(mid)
-        print("OK:", msg)
-    except Exception as e:
-        # Error detail group में भेज दो (taaki samajh aaye क्या टूटा)
-        err = f"⚠️ {INDEX} fetch error: {e}"
-        try:
-            tg_send(err)
-        finally:
-            # workflow को hard-fail ना कराओ—silent success so that अगला schedule चले
-            print(err)
+    if not (BOT_TOKEN and CHAT_ID and INDEX):
+        raise SystemExit("Missing BOT_TOKEN / CHAT_ID / INDEX")
+    digits, src = get_index_two_digits(INDEX)
+    ts = datetime.now().strftime("%d-%m-%Y %H:%M IST")
+    if digits:
+        text = f"<b>{INDEX}</b> : <b>{digits}</b>\n<code>{ts}</code>"
+        _send(text, pin=True)
+    else:
+        _send(f"⚠️ {INDEX} fetch error: no price (rate/conn).", pin=False)
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     main()
