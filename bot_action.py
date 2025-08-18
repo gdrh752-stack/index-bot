@@ -1,113 +1,91 @@
-import os, time, datetime as dt, json, textwrap
+import os, re, time, html
 import requests
 
-BOT_TOKEN  = os.environ["BOT_TOKEN"]
-CHAT_ID    = os.environ["CHAT_ID"]
-INDEX      = os.environ.get("INDEX", "").upper().strip()   # HSI, KS11, TWII, BSESN, DAX, DJI
-TD_API_KEY = os.environ["TD_API_KEY"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID   = os.environ["CHAT_ID"]
+INDEX     = os.environ["INDEX"].upper().strip()
 
-# Twelve Data symbols map (safe defaults)
-SYMBOLS = {
-    "HANGSENG": "HSI",
-    "KOSPI":    "KS11",
-    "TAIWAN":   "TWII",
-    "SENSEX":   "BSESN",
-    "DAX":      "DAX",
-    "DOWJONES": "DJI",
-    "DOW":      "DJI",
+# Yahoo Finance pages (region-agnostic)
+YAHOO_URLS = {
+    "TAIWAN":   "https://finance.yahoo.com/quote/%5ETWII",
+    "KOSPI":    "https://finance.yahoo.com/quote/%5EKS11",
+    "HANGSENG": "https://finance.yahoo.com/quote/%5EHSI",
+    "SENSEX":   "https://finance.yahoo.com/quote/%5EBSESN",
+    "DAX":      "https://finance.yahoo.com/quote/%5EGDAXI",
+    "DOWJONES": "https://finance.yahoo.com/quote/%5EDJI",
 }
 
-SYMBOL = SYMBOLS.get(INDEX, INDEX)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+}
 
-TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+def fetch_price(url, attempts=6, wait=8):
+    """
+    Pull the live price number from Yahoo Finance page HTML.
+    We look for the first big numeric like 25,176.85 in the page.
+    """
+    for i in range(attempts):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            if r.status_code == 200:
+                text = r.text
 
-def tg_send(text, disable_notification=False):
-    r = requests.post(f"{TG_API}/sendMessage", json={
+                # Find something like 25,176.85 or 2,345.00
+                m = re.search(r'(\d{1,3}(?:,\d{3})*(?:\.\d+))', text)
+                if m:
+                    raw = m.group(1)              # e.g. "25,176.85"
+                    no_commas = raw.replace(",", "")
+                    return float(no_commas)       # 25176.85
+                # Fallback: try a second pattern Yahoo sometimes uses
+                m2 = re.search(r'currentPrice.+?raw":\s*([\d\.]+)', text)
+                if m2:
+                    return float(m2.group(1))
+            # rate limiting / empty – back off
+            time.sleep(wait)
+        except Exception:
+            time.sleep(wait)
+    return None
+
+def last_two_decimals(value: float) -> str:
+    """
+    Return first two digits after decimal (00-99), WITHOUT rounding issues.
+    25176.85 -> "85"; 123.4 -> "40".
+    """
+    s = f"{value:.4f}"         # plenty precision
+    decimal = s.split(".")[1]  # e.g. "8500"
+    return (decimal + "00")[:2]
+
+def tg_send(text: str, disable_notification=True, pin=False):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
         "chat_id": CHAT_ID,
         "text": text,
         "disable_notification": disable_notification,
-    }, timeout=20)
-    r.raise_for_status()
-    return r.json()["result"]["message_id"]
-
-def tg_pin(message_id):
-    r = requests.post(f"{TG_API}/pinChatMessage", json={
-        "chat_id": CHAT_ID,
-        "message_id": message_id,
-        "disable_notification": True
-    }, timeout=20)
-    # ignore pin errors (not admin etc.)
-    try:
-        r.raise_for_status()
-    except Exception:
-        pass
-
-def ist_now():
-    # UTC+5:30
-    return dt.datetime.utcnow() + dt.timedelta(hours=5, minutes=30)
-
-def fetch_price(symbol, retries=5, base_sleep=5):
-    """
-    Robust Twelve Data fetch with backoff.
-    We call the lightweight /price endpoint; when market is closed, it returns last price.
-    """
-    url = "https://api.twelvedata.com/price"
-    params = {"symbol": symbol, "apikey": TD_API_KEY}
-    for i in range(retries):
-        try:
-            r = requests.get(url, params=params, timeout=15)
-            # Handle 429 and other errors explicitly
-            if r.status_code == 429:
-                # Too many requests -> backoff harder
-                sleep_for = base_sleep * (2 ** i)
-                time.sleep(sleep_for)
-                continue
-            r.raise_for_status()
-            data = r.json()
-            if "price" in data:
-                # return string price like "25176.85"
-                return data["price"]
-            # sometimes TwelveData returns {'status':'error','message':...}
-            # slow down and retry
-        except Exception:
-            pass
-        time.sleep(base_sleep * (i + 1))
-    return None
-
-def last_two_digits_from_price(price_str):
-    """
-    Keep only the last two digits after removing decimals and separators.
-    Example: "25176.85" -> "85"
-    """
-    raw = "".join(ch for ch in price_str if ch.isdigit())
-    if not raw:
-        return None
-    return raw[-2:].zfill(2)
+        "parse_mode": "HTML",
+    }
+    r = requests.post(url, data=payload, timeout=15)
+    if pin and r.ok:
+        msg_id = r.json().get("result", {}).get("message_id")
+        if msg_id:
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage",
+                data={"chat_id": CHAT_ID, "message_id": msg_id, "disable_notification": True},
+                timeout=15
+            )
 
 def main():
-    now_ist = ist_now()
-    when = now_ist.strftime("%d-%m-%Y %H:%M IST")
-
-    price = fetch_price(SYMBOL)
-    if not price:
-        tg_send(f"⚠️ {INDEX} fetch error: no price (rate/conn).")
+    if INDEX not in YAHOO_URLS:
+        tg_send(f"⚠️ INDEX missing/invalid: <b>{html.escape(INDEX)}</b>")
         return
 
-    last2 = last_two_digits_from_price(price)
-    if not last2:
-        tg_send(f"⚠️ {INDEX} parse error.")
+    price = fetch_price(YAHOO_URLS[INDEX])
+    if price is None:
+        tg_send(f"⚠️ {INDEX} fetch error: no price (rate/conn.).")
         return
 
-    text = f"{INDEX} : {last2}\n{when}"
-    mid = tg_send(text)
-    tg_pin(mid)
+    num = last_two_decimals(price)  # yehi tumhe chahiye
+    tg_send(f"<b>{INDEX}</b> : <b>{num}</b>", pin=True)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        # absolute last-chance guard so Action shows a message instead of hard fail
-        try:
-            tg_send(f"⚠️ {INDEX} unexpected error: {e}")
-        finally:
-            raise
+    main()
