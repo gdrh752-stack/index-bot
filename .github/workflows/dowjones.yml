@@ -2,13 +2,15 @@ name: Dow Jones
 
 on:
   schedule:
-    # 1:31 AM IST (next day)  ⇒  20:01 UTC (same day, Mon–Fri)
-    - cron: "1 20 * * 1-5"
+    # 01:31 AM IST (Tue–Sat) == 20:01 UTC (Mon–Fri previous day)
+    # Run Sun–Thu at 20:01 UTC so India me Mon–Fri 01:31 AM hota hai
+    - cron: "1 20 * * 0-4"
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,9 +18,19 @@ jobs:
           python-version: "3.11"
       - name: Install deps
         run: pip install -r requirements.txt
-      - name: Run Dow Jones job
+      - name: Run DOWJONES job (with retry)
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:   ${{ secrets.CHAT_ID }}
           INDEX:     DOWJONES
-        run: python bot_action.py
+        run: |
+          set -e
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            if python bot_action.py; then exit 0; fi
+            echo "Attempt $i failed. Waiting 20s..."; sleep 20
+          done
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d text="⚠️ DOW JONES update failed after 3 attempts."
+          exit 1
