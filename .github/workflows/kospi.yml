@@ -1,0 +1,19 @@
+name: KOSPI (RESULT TIME)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "32 6 * * 1-5"   # 12:02 IST => 06:32 UTC
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Run KOSPI
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    KOSPI
+        run: python bot_action.py
