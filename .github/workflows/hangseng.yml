@@ -1,0 +1,19 @@
+name: Hang Seng (RESULT TIME)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "11 8 * * 1-5"   # 13:41 IST => 08:11 UTC
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Run Hang Seng
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    HANGSENG
+        run: python bot_action.py
