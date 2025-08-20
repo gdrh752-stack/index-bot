@@ -1,0 +1,19 @@
+name: Dow Jones (RESULT TIME)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "1 20 * * 1-5"   # 01:31 IST => 20:01 UTC
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Run Dow Jones
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    DOWJONES
+        run: python bot_action.py
