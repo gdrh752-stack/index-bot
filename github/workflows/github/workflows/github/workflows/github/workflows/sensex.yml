@@ -1,0 +1,20 @@
+name: sensex (RESULT TIME)
+
+on:
+  schedule:
+    - cron: "1 10 * * *"   # 03:31 PM IST
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Post SENSEX result
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    SENSEX
+        run: python bot_action.py
