@@ -1,0 +1,20 @@
+name: hangseng (RESULT TIME)
+
+on:
+  schedule:
+    - cron: "11 8 * * *"   # 01:41 PM IST
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Post HANGSENG result
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:  ${{ secrets.CHAT_ID }}
+          INDEX:    HANGSENG
+        run: python bot_action.py
